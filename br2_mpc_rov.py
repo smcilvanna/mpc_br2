@@ -3,7 +3,6 @@
 
 import casadi as ca
 import numpy as np
-import math
 import time
 # from matplotlib import pyplot as plt
 # import matplotlib.animation as animation
@@ -30,13 +29,10 @@ def sys_arm():
     print("Armed")
 
 def wraptopi(x):   # used to wrap angle errors to interval [-pi pi]
-    
-    x = math.radians(x)
-    pi = math.pi  
-    x = x - math.floor(x/(2*pi)) *2*pi
-    if x > pi:
-        x = x - 2*pi
-    x = math.degrees(x)
+     
+    x = x - np.floor(x/(2*np.pi)) *2*np.pi
+    if x > np.pi:
+        x = x - 2*np.pi
     return x
 
 def map_range(x, in_min, in_max, out_min, out_max):
@@ -83,7 +79,7 @@ def tau2pwm(tau):
         else: # rotational
             pwm[idx] = (ctrl + 66.15) / 0.0441
 
-        dz = 25
+        dz = 5
 
         if pwm[idx] > (1500-dz) and pwm[idx] < (1500+dz):
             pwm[idx] = 1500
@@ -188,23 +184,22 @@ class br2MPC:
 
         ### define
         #Q = ca.diagcat(70,70,70,30,30,30,1,1,1,1,1,1)
-        Qp = ca.diagcat(20,20,1,1,1,10)                 # Position error weights
+        Qp = ca.diagcat(100,100,1,1,1,50)                 # Position error weights
         #Qv = ca.diagcat(15,15,15,100,100,100)           # Velocity error weights
-        Qv = ca.diagcat(1,1,1,1,1,1)           # Velocity error weights
+        Qv = ca.diagcat(1,1,1,1,1,1)                    # Velocity error weights
 
         q = 10000
         Q = ca.diagcat(q,q,q,q,q,q)                     # CLF weights
 
-        R = ca.diagcat(5,5,1,1,1,5)                     # Control Weights
-        V = 10**7*ca.diagcat(5,5,1,1,1,5)
+        R = ca.diagcat(1,1,1,1,1,1)                     # Control Weights
+        V = 10**7*ca.diagcat(1,1,1,1,1,5)
 
         ## Cost Function
         obj = 0 # initalise objective function
         g = [] # initalise constraints vector
         
-        g.append(S[0:6, 0]- P[12:, 0])
-        g.append(S[6:12,0] - P[6:12,0])
-        
+        g.append(S[0:12, 0]- P[0:12, 0])
+                
         for i in range(self.N):
 
             psn_err = S[0:6, i] - P[12:, 0]
@@ -223,8 +218,6 @@ class br2MPC:
             x_next_ = f(S[:, i], T[:, i])*self.DT + S[:, i]
             g.append(S[:, i+1] - x_next_ )   
         
-
-        print(len(g))
         
         state_error_N = S[0:6, self.N] - P[12:, 0]    
         obj = obj + ca.mtimes([state_error_N[0:6].T, V, state_error_N[0:6]])
@@ -233,7 +226,7 @@ class br2MPC:
         opt_params = ca.reshape(P, -1, 1)
 
         nlp_prob = {'f': obj, 'x': opt_variables, 'p':opt_params, 'g':ca.vertcat(*g)}
-        opts_setting = {'ipopt.max_iter':100, 'ipopt.print_level':0, 'print_time':0, 'ipopt.acceptable_tol':1e-8, 'ipopt.acceptable_obj_change_tol':1e-6}
+        opts_setting = {'ipopt.max_iter':100, 'ipopt.print_level':5, 'print_time':0, 'ipopt.acceptable_tol':1e-8, 'ipopt.acceptable_obj_change_tol':1e-6}
 
         self.solver = ca.nlpsol('solver', 'ipopt', nlp_prob, opts_setting)
 
@@ -274,10 +267,10 @@ if __name__ == '__main__':
     rPosSub = "/rov" + str(rov_id-1) + "_position"  # set the neighbour rov to track
     rPosPub = "/rov" + str(rov_id) + "_position"    # set the publisher for this rov position
 
-    rospy.init_node(rnodeName, anonymous=False)             # setup ros node
-    rospy.Subscriber(rPosSub, NavSatFix, listenCB)          # setup subscriber to get neighbour position
-    rospy.Subscriber(rPosPub, Vector3, getFormation)        # subscriber for formation configuration
-    pub = rospy.Publisher('/rov1_position', NavSatFix, queue_size=1 ) # setup publisher for this rov position
+    # rospy.init_node(rnodeName, anonymous=False)             # setup ros node
+    # rospy.Subscriber(rPosSub, NavSatFix, listenCB)          # setup subscriber to get neighbour position
+    # rospy.Subscriber(rPosPub, Vector3, getFormation)        # subscriber for formation configuration
+    # pub = rospy.Publisher('/rov1_position', NavSatFix, queue_size=1 ) # setup publisher for this rov position
 
     # LOCATION
     dlat =  []                  # global variable for desired latitude
@@ -301,13 +294,15 @@ if __name__ == '__main__':
     fleg1 = False
     fleg2 = False
     fleg3 = False
-    t_last_ahrs2 = -999
+    fleg4 = True   # first time mpc solver is called go False, changes input parameters to solver
+
+    t_last_ahrs2 = -999 # holds timestamp of previous reading, for calculating rates
 
     #mpc
     tau = np.array([0,0,0,0,0,0])
 
     N = 20
-    rov = br2MPC(N)
+    rov = br2MPC(N)    
 
     #### START OF CONTROL LOOP ####
     # while not flag_subscriber:
@@ -320,33 +315,57 @@ if __name__ == '__main__':
 
     while not rospy.is_shutdown():
         
+        mpcFleg = fleg1 and fleg2 and fleg3
         
-        if fleg1 and fleg2 and fleg3 :
+        if mpcFleg :
 
             J = np.array([[np.cos(rov_yaw), -np.sin(rov_yaw)] , [np.sin(rov_yaw), np.cos(rov_yaw)]])
             j = np.linalg.inv(J)
-            evel = np.array([[earth_vx], [earth_vy] ])
+            evel = np.array([ [earth_vx], [earth_vy] ])
             rvel = j @ evel
             rov_vel_x = rvel[0,0]
             rov_vel_y = rvel[1,0]
             rov_vel_z = 0
 
             rovState    = np.array([rov_x, rov_y, rov_z, rov_pitch, rov_roll, rov_yaw, rov_vel_x, rov_vel_y, rov_vel_z, rov_pitch_vel, rov_roll_vel, rov_yaw_vel ])
-            goalState   = np.array([0.00, 0.00 ,-0.50, 0.00, 0.00, -3.0]); 
+            
+            
+            ##############################################################################################################
+            
+            goalState   = np.array([ 100.00, 0.00 ,-0.50, 0.00, 0.00, 0.00 ]); 
+
+            ##############################################################################################################
+
+            # yawErr = wraptopi(rovState[5] - goalState[5])
+
+            # rovState[5] = yawErr * 10
+            # goalState[5] = 0.00
 
             rovState    = rovState.reshape((-1,1))
             goalState   = goalState.reshape((-1,1))
 
+            if fleg4:   # different argX0 settings for first mpc call        
+                X0 = np.tile(rovState,(N+1, 1))
+                u0 = np.tile(tau, (N, 1)) ; u0 = u0.reshape((-1,1))
+                fleg4 = False
 
-            X0 = np.tile(rovState,(N+1, 1))
-            u0 = np.tile(tau, (N, 1)) ; u0 = u0.reshape(-1,1)
-            arg_X0 = np.vstack((X0,u0))
+            else:
+                X0 = np.concatenate( [rovState, pos_est])       # [ fb_state, state_est_t2, stest_t3, stest_t4, ... , sest_tN ]  : ( 12(N+1) x 1 )
+                u0 = np.concatenate([ u_est, u_est[18:24] ])    # [ u_est_t2, u_est_t3 , ... , u_est(N-1), u_est_tN, u_est_tN]   : (      6N x 1 )
+
+            # print(np.shape(u0))
+            # print(np.shape(X0))
+            arg_X0 = np.vstack((u0,X0))
             arg_p = np.vstack((rovState,goalState))
 
-            sol = rov.solver(x0=arg_X0, p=arg_p, lbg=rov.lbg, lbx=rov.lbx, ubg=rov.ubg, ubx=rov.ubx)
-            estimated_opt = sol['x'].full()
-            u_now = estimated_opt[(12*N):(12*N + 6)]
 
+            sol = rov.solver(x0=arg_X0, p=arg_p)
+            estimated_opt = sol['x'].full()
+            u_now = estimated_opt[0:6]          # control signal for this timestep
+            u_est = estimated_opt[6:(6*N)]      # used to generate u0 for mpc in next timestep
+
+            #pos_est = np.concatenate([ estimated_opt[(6*N + 12):] , estimated_opt[-12:] ])    # used to generate X0 for mpc in next timestep
+            pos_est = estimated_opt[(6*N + 12):]
             u_pwm = tau2pwm(u_now)
 
             print(time.time(), '\n' , rovState[0:6])
@@ -364,8 +383,8 @@ if __name__ == '__main__':
             # des_y = dlon + osetE
             # des_x = dlat + osetN
 
-            #set_rc_channel_pwm(5,int(u_pwm[0])) # set surge control
-            #set_rc_channel_pwm(6,int(u_pwm[1])) # set lateral control
+            set_rc_channel_pwm(5,int(u_pwm[0])) # set surge control
+            set_rc_channel_pwm(6,int(u_pwm[1])) # set lateral control
             set_rc_channel_pwm(4,int(u_pwm[5])) # set yaw control
 
             tau = u_now
