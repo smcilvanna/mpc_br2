@@ -79,7 +79,7 @@ def tau2pwm(tau):
         else: # rotational
             pwm[idx] = (ctrl + 66.15) / 0.0441
 
-        dz = 5
+        dz = 25
 
         if pwm[idx] > (1500-dz) and pwm[idx] < (1500+dz):
             pwm[idx] = 1500
@@ -100,12 +100,14 @@ class br2MPC:
         self.v_roll_max = np.pi/5
         self.v_pitch_max = np.pi/5 
         self.v_yaw_max = np.pi/5
-        self.tau_x_max = 100
-        self.tau_x_max = 100
-        self.tau_x_max = 100
+        self.tau_x_max = 50
+        self.tau_y_max = 50
+        self.tau_z_max = 10
         self.tau_roll_max = 10
         self.tau_pitch_max = 10
         self.tau_yaw_max = 10
+
+
 
         x = ca.SX.sym('x') 
         y = ca.SX.sym('y')
@@ -184,7 +186,7 @@ class br2MPC:
 
         ### define
         #Q = ca.diagcat(70,70,70,30,30,30,1,1,1,1,1,1)
-        Qp = ca.diagcat(100,100,1,1,1,50)                 # Position error weights
+        Qp = ca.diagcat(10,10,1,1,1,10)                 # Position error weights
         #Qv = ca.diagcat(15,15,15,100,100,100)           # Velocity error weights
         Qv = ca.diagcat(1,1,1,1,1,1)                    # Velocity error weights
 
@@ -226,9 +228,12 @@ class br2MPC:
         opt_params = ca.reshape(P, -1, 1)
 
         nlp_prob = {'f': obj, 'x': opt_variables, 'p':opt_params, 'g':ca.vertcat(*g)}
-        opts_setting = {'ipopt.max_iter':100, 'ipopt.print_level':5, 'print_time':0, 'ipopt.acceptable_tol':1e-8, 'ipopt.acceptable_obj_change_tol':1e-6}
+        opts_setting = {'ipopt.max_iter':100, 'ipopt.print_level': 0, 'print_time':0, 'ipopt.acceptable_tol':1e-8, 'ipopt.acceptable_obj_change_tol':1e-6}
 
         self.solver = ca.nlpsol('solver', 'ipopt', nlp_prob, opts_setting)
+
+        print(nlp_prob)
+        print(self.solver)
 
         self.lbg = []
         self.ubg = []
@@ -240,15 +245,13 @@ class br2MPC:
             self.lbg.append(0.0)
             self.ubg.append(0.0)
 
-        print(np.shape(self.lbg))
-
         # for _ in range(N*n_SO):
         #     lbg.append(0.0)
         #     ubg.append(np.inf)   
          
         for _ in range(self.N):  # boundary of control input
-            self.lbx += [-self.tau_x_max, -self.tau_x_max, -self.tau_x_max, -self.tau_roll_max, -self.tau_pitch_max, -self.tau_yaw_max]
-            self.ubx += [ self.tau_x_max,  self.tau_x_max,  self.tau_x_max,  self.tau_roll_max,  self.tau_pitch_max,  self.tau_yaw_max]
+            self.lbx += [-self.tau_x_max, -self.tau_y_max, -self.tau_z_max, -self.tau_roll_max, -self.tau_pitch_max, -self.tau_yaw_max]
+            self.ubx += [ self.tau_x_max,  self.tau_y_max,  self.tau_z_max,  self.tau_roll_max,  self.tau_pitch_max,  self.tau_yaw_max]
         for _ in range(self.N+1): # boundary of state
             self.lbx += [ -100, -100, -2, -np.inf, -np.inf, -np.inf, -self.vx_max, -self.vy_max, -self.vz_max, -self.v_roll_max, -self.v_pitch_max, -self.v_yaw_max]
             self.ubx += [  100,  100,  2,  np.inf,  np.inf,  np.inf,  self.vx_max,  self.vy_max,  self.vz_max,  self.v_roll_max,  self.v_pitch_max,  self.v_yaw_max]
@@ -332,7 +335,7 @@ if __name__ == '__main__':
             
             ##############################################################################################################
             
-            goalState   = np.array([ 100.00, 0.00 ,-0.50, 0.00, 0.00, 0.00 ]); 
+            goalState   = np.array([ 20.00, 0.00 ,-0.50, 0.00, 0.00, 0.00 ]); 
 
             ##############################################################################################################
 
@@ -358,8 +361,7 @@ if __name__ == '__main__':
             arg_X0 = np.vstack((u0,X0))
             arg_p = np.vstack((rovState,goalState))
 
-
-            sol = rov.solver(x0=arg_X0, p=arg_p)
+            sol = rov.solver(x0=arg_X0, p=arg_p, lbg=rov.lbg, lbx=rov.lbx, ubg=rov.ubg, ubx=rov.ubx)
             estimated_opt = sol['x'].full()
             u_now = estimated_opt[0:6]          # control signal for this timestep
             u_est = estimated_opt[6:(6*N)]      # used to generate u0 for mpc in next timestep
@@ -368,9 +370,15 @@ if __name__ == '__main__':
             pos_est = estimated_opt[(6*N + 12):]
             u_pwm = tau2pwm(u_now)
 
-            print(time.time(), '\n' , rovState[0:6])
-            print("################")
-            print(u_pwm)
+            # idxs = np.arange(0,np.size(pos_est,0),12)
+
+            # x_est = pos_est[idxs]
+            # print(x_est)
+
+            #print(u_now)
+            print('\n', rovState[0:3])
+            # print("################")
+            #print(u_pwm)
 
             # rosmsg = Vector3()                             # update the ros topic
             # rosmsg.x    = rov_x
@@ -385,7 +393,7 @@ if __name__ == '__main__':
 
             set_rc_channel_pwm(5,int(u_pwm[0])) # set surge control
             set_rc_channel_pwm(6,int(u_pwm[1])) # set lateral control
-            set_rc_channel_pwm(4,int(u_pwm[5])) # set yaw control
+            #set_rc_channel_pwm(4,int(u_pwm[5])) # set yaw control
 
             tau = u_now
 
